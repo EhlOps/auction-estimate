@@ -14,25 +14,27 @@ for both sites -- the two auction houses genuinely price the same cars different
 
 ## Setup
 
+This project uses [uv](https://docs.astral.sh/uv/). `uv run` auto-syncs the environment
+from `pyproject.toml` / `uv.lock` on first use, so you don't need to create a venv manually.
+
 ```bash
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
-.venv/bin/python -m playwright install --with-deps chromium   # needed for the C&B scraper only
+uv sync                                   # install dependencies into .venv
+uv run playwright install chromium        # browser for the C&B scraper only (one-time)
 ```
 
 ## Pipeline
 
 ```bash
 # 1. Scrape (safe to interrupt/resume -- every listing is cached to data/raw/ by id)
-.venv/bin/python scrape_all.py                    # full run, all families/platforms
-.venv/bin/python scrape_all.py --families mini    # just one family
-.venv/bin/python scrape_all.py --max-pages 3       # small test run
+uv run python scrape_all.py                    # full run, all families/platforms
+uv run python scrape_all.py --families mini    # just one family
+uv run python scrape_all.py --max-pages 3       # small test run
 
 # 2. Train (rebuilds comps + macro features, trains price + sell models)
-.venv/bin/python models/train.py
+uv run python models/train.py
 
 # 3. Predict
-.venv/bin/python predict.py --family mini --year 2020 --generation F55/F56 --trim jcw_gp \
+uv run python predict.py --family mini --year 2020 --generation F55/F56 --trim jcw_gp \
     --mileage 500 --transmission manual --no-reserve --special-edition --current-bid 65000
 ```
 
