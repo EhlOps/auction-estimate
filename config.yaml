@@ -1,0 +1,47 @@
+# Scrape targets and filters, one entry per enthusiast family we're modeling.
+# `bat_category` is a Bring a Trailer make/model archive slug (bringatrailer.com/<slug>/).
+# `cnb_make_slug` is the Cars & Bids make slug used in /search/<slug>.
+# `title_include` / `title_exclude` are case-insensitive regexes applied to the listing
+# title (and C&B sub_title) to decide whether a lot belongs to this family. Families whose
+# BaT/C&B category already IS the family (e.g. MINI) use title_include: null to keep everything.
+
+families:
+  mini:
+    label: "MINI Cooper (all generations)"
+    bat_category: "mini"
+    cnb_make_slug: "mini"
+    title_include: null
+    title_exclude: null
+
+  vw_golf:
+    label: "VW Golf / GTI / R / GLI"
+    bat_category: "volkswagen"
+    cnb_make_slug: "volkswagen"
+    title_include: "golf|gti|gli|r32|\\bgolf r\\b"
+    title_exclude: null
+
+  bmw_wagon:
+    label: "BMW wagons (Touring / Sport Wagon)"
+    bat_category: "bmw"
+    cnb_make_slug: "bmw"
+    title_include: "touring|sport wagon|wagon|estate"
+    title_exclude: "touring car"   # avoid false-positive matches on race-spec listings
+
+scrape:
+  rate_limit_seconds: 2.0      # min delay between requests to the same host
+  bat_per_page: 48
+  cnb_per_page: 30
+  user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+  raw_dir: "data/raw"
+  processed_dir: "data/processed"
+
+macro:
+  # FRED series IDs pulled via fredgraph.csv, joined onto each lot by sale date.
+  series:
+    VIXCLS: "vix"                       # market uncertainty
+    UMCSENT: "consumer_sentiment"       # market conditions / consumer confidence
+    SP500: "sp500"                      # market conditions
+    FEDFUNDS: "fed_funds_rate"          # economic conditions (rate environment)
+    CUSR0000SETA02: "cpi_used_vehicles" # trend proxy (BLS used vehicle CPI component)
+    DRCLACBS: "loan_delinquency_rate"   # optional economic-stress signal (% of consumer loans delinquent)
+  cache_path: "data/processed/macro.parquet"
