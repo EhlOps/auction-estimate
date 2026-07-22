@@ -34,9 +34,22 @@ uv run python scrape_all.py --max-pages 3       # small test run
 uv run python models/train.py
 
 # 3. Predict
+
+# (a) From a live listing URL -- features are auto-extracted from BaT or Cars & Bids:
+uv run python predict.py --url https://carsandbids.com/auctions/XXXXXXXX
+uv run python predict.py --url https://bringatrailer.com/listing/some-car/
+
+# (b) From manually entered details:
 uv run python predict.py --family mini --year 2020 --generation F55/F56 --trim jcw_gp \
     --mileage 500 --transmission manual --no-reserve --special-edition --current-bid 65000
 ```
+
+Either way it prints a predicted sale price (P50) with a P10-P90 range and sell probability
+for **both** BaT and Cars & Bids, plus how that compares to the current bid. URL mode only
+works for the three modeled families (MINI Cooper, VW Golf, BMW wagon) and reuses the same
+listing parsers (`scrapers/listing.py`) and taxonomy the training data was built with, so a
+live car is featurized exactly like the training set. C&B URLs drive a headless browser
+(needs the one-time `playwright install chromium`); BaT URLs are plain HTTP.
 
 `predict.py --platforms bat cnb` (the default) scores the same car for both sites so you can
 see how much the venue itself moves the number; pass `--platforms bat` to only price one.
