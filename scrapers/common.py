@@ -33,6 +33,15 @@ class RateLimiter:
         self._last_call = time.monotonic()
 
 
+def normalize_bid(value: Any) -> float | None:
+    """BaT's live-auctions feed reports `current_bid: false` (not null/absent) for a
+    no-bids-yet listing -- coerce that (and any other bool) to None so callers never
+    silently treat "no bid" as "a bid of zero"."""
+    if value is None or isinstance(value, bool):
+        return None
+    return float(value)
+
+
 def slugify(text: str) -> str:
     text = text.lower().strip()
     text = re.sub(r"[^a-z0-9]+", "-", text)

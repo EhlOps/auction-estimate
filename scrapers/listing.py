@@ -2,14 +2,16 @@
 
 This is the glue that lets `predict.py --url <listing>` work: given one auction URL it
 pulls the same fields the training pipeline uses (year/trim/generation, mileage,
-transmission, reserve status, seller type) and the current bid, reusing the existing
-listing parsers and the make/model/generation taxonomy so a live listing is featurized
-exactly the way the trained data was.
+transmission, reserve status, seller type) plus live auction state -- current bid and
+time remaining -- reusing the existing listing parsers and the make/model/generation
+taxonomy so a live listing is featurized exactly the way the trained data was.
 """
 from __future__ import annotations
 
 import re
 import sys
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
@@ -19,13 +21,22 @@ from features.parse import MODIFIED_KEYWORDS_RE, parse_mileage, parse_transmissi
 from features.taxonomy import classify
 from scrapers.bat import parse_listing_detail_html
 from scrapers.carsandbids import TRANSMISSION_CODES
-from scrapers.common import get_with_retries, load_config
+from scrapers.common import get_with_retries, load_config, normalize_bid
 
 BAT_AUCTIONS_FEED = "https://bringatrailer.com/auctions/"
 
 
 class UnsupportedCar(ValueError):
     """Raised when a listing is not one of the families the model covers."""
+
+
+@dataclass
+class LiveState:
+    """A live auction's current bid + time remaining (None fields mean unknown, e.g.
+    the listing has already ended)."""
+    current_bid: float | None
+    ends_at: datetime | None
+    platform: str
 
 
 def infer_family(make: str | None, title: str | None) -> str | None:
@@ -67,29 +78,33 @@ def _feat_from_taxonomy(family: str, title: str, sub_title: str) -> dict:
 # Bring a Trailer
 # ---------------------------------------------------------------------------
 
-def _bat_live_meta(client: httpx.Client, listing_id: str | None) -> tuple[float | None, bool | None]:
-    """Looks up a live listing's current bid + reserve status from BaT's current-auctions
-    feed (the `auctionsCurrentInitialData` blob on /auctions/). Returns (None, None) if the
-    listing isn't currently live (e.g. it already ended)."""
+def _bat_live_meta(client: httpx.Client, listing_id: str | None) -> tuple[float | None, bool | None, datetime | None]:
+    """Looks up a live listing's current bid, reserve status, and end time from BaT's
+    current-auctions feed (the `auctionsCurrentInitialData` blob on /auctions/, whose items
+    carry a `timestamp_end` unix epoch). Returns (None, None, None) if the listing isn't
+    currently live (e.g. it already ended)."""
     if not listing_id:
-        return None, None
+        return None, None, None
     import json
 
     resp = get_with_retries(client, BAT_AUCTIONS_FEED)
     html = resp.text
     idx = html.find("auctionsCurrentInitialData")
     if idx == -1:
-        return None, None
+        return None, None, None
     start = html.find("{", idx)
     end = html.find("/* ]]", idx)
     data = json.loads(html[start:end].rstrip().rstrip(";"))
     for item in data.get("items", []):
         if str(item.get("id")) == str(listing_id):
-            return item.get("current_bid"), bool(item.get("noreserve"))
-    return None, None
+            ends_at = None
+            if item.get("timestamp_end") is not None:
+                ends_at = datetime.fromtimestamp(item["timestamp_end"], tz=timezone.utc)
+            return normalize_bid(item.get("current_bid")), bool(item.get("noreserve")), ends_at
+    return None, None, None
 
 
-def extract_bat(url: str, scrape_cfg: dict) -> tuple[dict, float | None, str]:
+def extract_bat(url: str, scrape_cfg: dict) -> tuple[dict, LiveState]:
     headers = {"User-Agent": scrape_cfg["user_agent"]}
     with httpx.Client(headers=headers, follow_redirects=True) as client:
         resp = get_with_retries(client, url)
@@ -97,7 +112,7 @@ def extract_bat(url: str, scrape_cfg: dict) -> tuple[dict, float | None, str]:
         detail = parse_listing_detail_html(html)
         title = _meta_content(html, "og:title") or ""
         excerpt = _meta_content(html, "og:description") or ""
-        current_bid, no_reserve = _bat_live_meta(client, _listing_id(html))
+        current_bid, no_reserve, ends_at = _bat_live_meta(client, _listing_id(html))
 
     family = infer_family(title, title)
     if family is None:
@@ -115,7 +130,7 @@ def extract_bat(url: str, scrape_cfg: dict) -> tuple[dict, float | None, str]:
         no_reserve=bool(no_reserve),
         seller_type=detail.get("seller_type"),
     )
-    return feat, current_bid, "bat"
+    return feat, LiveState(current_bid, ends_at, "bat")
 
 
 # ---------------------------------------------------------------------------
@@ -150,7 +165,7 @@ def _cnb_fetch_detail(url: str, auction_id: str, user_agent: str) -> dict:
     return box["data"]
 
 
-def extract_cnb(url: str, scrape_cfg: dict) -> tuple[dict, float | None, str]:
+def extract_cnb(url: str, scrape_cfg: dict) -> tuple[dict, LiveState]:
     m = re.search(r"/auctions/([A-Za-z0-9]+)", url)
     if not m:
         raise ValueError(f"Not a recognizable Cars & Bids auction URL: {url}")
@@ -164,7 +179,11 @@ def extract_cnb(url: str, scrape_cfg: dict) -> tuple[dict, float | None, str]:
     if family is None:
         raise UnsupportedCar(title)
 
-    current_bid = (data.get("stats", {}).get("current_bid") or {}).get("amount")
+    stats = data.get("stats", {})
+    current_bid = (stats.get("current_bid") or {}).get("amount")
+    ends_at = None
+    if stats.get("auction_end"):
+        ends_at = datetime.fromisoformat(stats["auction_end"].replace("Z", "+00:00"))
 
     feat = _feat_from_taxonomy(family, title, sub_title)
     feat.update(
@@ -175,11 +194,11 @@ def extract_cnb(url: str, scrape_cfg: dict) -> tuple[dict, float | None, str]:
         # Training left C&B seller_type unset, so keep it None to match the model's categories.
         seller_type=None,
     )
-    return feat, current_bid, "cnb"
+    return feat, LiveState(current_bid, ends_at, "cnb")
 
 
-def extract(url: str, scrape_cfg: dict | None = None) -> tuple[dict, float | None, str]:
-    """Dispatches to the right extractor by domain. Returns (feature_dict, current_bid, platform)."""
+def extract(url: str, scrape_cfg: dict | None = None) -> tuple[dict, LiveState]:
+    """Dispatches to the right extractor by domain. Returns (feature_dict, live_state)."""
     scrape_cfg = scrape_cfg or load_config()["scrape"]
     if "bringatrailer.com" in url:
         return extract_bat(url, scrape_cfg)
@@ -189,7 +208,7 @@ def extract(url: str, scrape_cfg: dict | None = None) -> tuple[dict, float | Non
 
 
 if __name__ == "__main__":
-    feat, bid, platform = extract(sys.argv[1])
-    print(f"platform={platform} current_bid={bid}")
+    feat, live = extract(sys.argv[1])
+    print(f"platform={live.platform} current_bid={live.current_bid} ends_at={live.ends_at}")
     for k, v in feat.items():
         print(f"  {k}: {v}")

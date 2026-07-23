@@ -35,6 +35,14 @@ scrape:
   raw_dir: "data/raw"
   processed_dir: "data/processed"
 
+live_adjust:
+  # How the estimate reacts to a live current bid + time remaining (predict.py --url, or
+  # --current-bid/--time-remaining in manual mode). See models/adjust.py. The base models
+  # never see either signal directly -- this is a closed-form stand-in until enough live
+  # snapshots (scrapers/snapshot.py) accrue to fit a real decay curve.
+  blend_window_hours: 6.0            # only inside this window does time pull P50 toward the current bid
+  p_sell_bid_above_fair_boost: 0.15  # P(sell) bump when current bid has already reached the model's P50
+
 macro:
   # FRED series IDs pulled via fredgraph.csv, joined onto each lot by sale date.
   series:

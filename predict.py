@@ -28,6 +28,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from features.comps import compute_comp_for_lot
 from features.macro import join_macro, load_macro_table
+from models.adjust import adjust_prediction
 from models.dataset import BOOL_COLS, CATEGORICAL_COLS, FEATURE_COLS, NUMERIC_COLS, load_feature_dataset
 from models.train import ARTIFACTS_DIR
 from scrapers.common import load_config
@@ -94,7 +95,7 @@ def predict_for_platform(price_models: dict, sell_model, X: pd.DataFrame) -> dic
 
 
 def run_prediction(feat: dict, platforms: list[str], current_bid: float | None,
-                   bid_platform: str | None, cfg: dict) -> None:
+                   hours_left: float | None, bid_platform: str | None, cfg: dict) -> None:
     if not (ARTIFACTS_DIR / "price_models.joblib").exists():
         print("No trained models found -- run `uv run python models/train.py` first.", file=sys.stderr)
         sys.exit(1)
@@ -112,19 +113,23 @@ def run_prediction(feat: dict, platforms: list[str], current_bid: float | None,
     for platform in platforms:
         X = build_input_row(feat, history, cfg, platform)
         pred = predict_for_platform(price_models, sell_model, X)
+        adj = adjust_prediction(pred, current_bid, hours_left, bool(feat.get("no_reserve")), cfg["live_adjust"])
         line = (
-            f"  {PLATFORM_LABELS[platform]:16s}  P50 ${pred['p50']:>9,.0f}   "
-            f"(P10 ${pred['p10']:>9,.0f} - P90 ${pred['p90']:>9,.0f})   "
-            f"P(sells) {pred['p_sell']:.0%}"
+            f"  {PLATFORM_LABELS[platform]:16s}  P50 ${adj['p50']:>9,.0f}   "
+            f"(P10 ${adj['p10']:>9,.0f} - P90 ${adj['p90']:>9,.0f})   "
+            f"P(sells) {adj['p_sell']:.0%}"
         )
         if current_bid is not None:
             delta = pred["p50"] - current_bid
             verb = "under" if delta > 0 else "over"
             line += f"   vs bid ${current_bid:,.0f}: {verb} by ${abs(delta):,.0f}"
+            if adj["p50"] != pred["p50"]:
+                line += f"   [fair value P50 ${pred['p50']:,.0f}]"
         print(line)
 
     if current_bid is not None and bid_platform:
-        print(f"\n  (current bid ${current_bid:,.0f} observed on {PLATFORM_LABELS[bid_platform]})")
+        closes = f", closes in {hours_left:.1f}h" if hours_left is not None else ""
+        print(f"\n  (current bid ${current_bid:,.0f} observed on {PLATFORM_LABELS[bid_platform]}{closes})")
     print()
 
 
@@ -162,6 +167,8 @@ def main() -> None:
     parser.add_argument("--modified", action="store_true")
     parser.add_argument("--special-edition", action="store_true")
     parser.add_argument("--current-bid", type=float, default=None, help="for over/under comparison (manual mode)")
+    parser.add_argument("--time-remaining", type=float, default=None,
+                        help="hours left in the auction, for the time-decay blend (manual mode)")
     parser.add_argument("--sale-date", default=None, help="YYYY-MM-DD, default today")
     parser.add_argument("--platforms", nargs="+", default=["bat", "cnb"], choices=["bat", "cnb"])
     args = parser.parse_args()
@@ -169,20 +176,25 @@ def main() -> None:
     cfg = load_config()
 
     if args.url:
+        from datetime import datetime, timezone
+
         from scrapers.listing import UnsupportedCar, extract
 
         try:
-            feat, current_bid, bid_platform = extract(args.url, cfg["scrape"])
+            feat, live = extract(args.url, cfg["scrape"])
         except UnsupportedCar as exc:
             print(f"That car ('{exc}') isn't in a family this model covers "
                   f"(MINI Cooper, VW Golf, or BMW wagon).", file=sys.stderr)
             sys.exit(1)
-        run_prediction(feat, args.platforms, current_bid, bid_platform, cfg)
+        hours_left = None
+        if live.ends_at is not None:
+            hours_left = max(0.0, (live.ends_at - datetime.now(timezone.utc)).total_seconds() / 3600)
+        run_prediction(feat, args.platforms, live.current_bid, hours_left, live.platform, cfg)
         return
 
     if args.family is None or args.year is None or args.mileage is None or args.transmission is None:
         parser.error("without --url you must provide --family, --year, --mileage, and --transmission")
-    run_prediction(feat_from_args(args), args.platforms, args.current_bid, None, cfg)
+    run_prediction(feat_from_args(args), args.platforms, args.current_bid, args.time_remaining, None, cfg)
 
 
 if __name__ == "__main__":
